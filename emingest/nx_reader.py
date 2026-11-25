@@ -125,8 +125,8 @@ def write_signal(template, signal, event, source, checksum, kind="", plugin="", 
     template[f"{src_grp}/PROCESS[process]/input/type"] = "file"
     template[f"{src_grp}/PROCESS[process]/input/context"] = f"read with rosettasciio ({plugin})" if plugin else \
         "read with rosettasciio"
-    if detector:
-        template[f"{src_grp}/PROCESS[process]/detector_identifier"] = detector
+    # required by NXem: the detector of the form, else "unknown"
+    template[f"{src_grp}/PROCESS[process]/detector_identifier"] = detector or "unknown"
     template[f"{grp}/title"] = f"{title}" + (f" ({kind})" if kind else "")
     template[f"{grp}/@signal"] = sigf
     template[f"{grp}/{sigf}"] = _compressed(data)
