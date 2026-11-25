@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emingest"
+dynamic = ["version"]
+description = "TEM data of any kind and format (rosettasciio / pynxtools-em) into NOMAD: chunked upload, NXem metadata form, rich-text description, elabFTW import, NXem conversion action"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Christoph T. Koch" }]
+dependencies = [
+    "numpy",
+    "h5py",
+    "pyyaml",
+    "ipywidgets>=8",
+    "rosettasciio",
+    "pynxtools>=0.16",
+    "pynxtools-em>=0.4",
+    "ase",
+]
+
+[project.optional-dependencies]
+# stand-alone web app (solara run webapp/solara_app.py); solara-assets must match the solara version
+web = ["solara==1.58.2", "solara-assets==1.58.2"]
+# readers of more formats (rosettasciio extras: tifffile, imageio, mrcz, blosc ...)
+formats = ["rosettasciio[all]", "hyperspy"]
+# NOMAD plugin (dashboard + action + ELN schema); nomad-lab itself comes with the NOMAD installation
+nomad = ["solara==1.58.2", "solara-assets==1.58.2", "httpx", "websockets", "nomad-measurements"]
+notebooks = ["jupyter", "voila"]
+dev = ["pytest"]
+
+[project.urls]
+Repository = "https://github.com/christophys/EMingest"
+
+[project.entry-points.'nomad.plugin']
+emingest_dashboard = "emingest_nomad.dashboards:emingest_dashboard"
+emingest_schema = "emingest_nomad.schema_packages:tem_schema"
+emingest_nxem_conversion = "emingest_nomad.actions:emingest_nxem_conversion"
+
+[project.entry-points.'pynxtools.reader']
+tem = "emingest.nx_reader:TEMReader"
+
+[tool.setuptools.dynamic]
+version = { attr = "emingest.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["emingest", "emingest.*", "emingest_nomad", "emingest_nomad.*"]
+
+[tool.ruff]
+line-length = 120
