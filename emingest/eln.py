@@ -97,8 +97,13 @@ def eln_archive(name, meta, files, schema="plugin", eln_data_file="", nxem_files
             data["end_time"] = md.to_iso(e.get("end_time"))
         data["project_name"] = p.get("name")
         data["tags"] = list(meta.get("tags") or [])
-        sample = {k: s.get(k) for k in ("name", "identifier_sample", "identifier_parent", "chemical_formula",
-                                         "physical_form")}
+        sample = {k: s.get(k) for k in ("name", "identifier_sample", "identifier_owner", "identifier_parent",
+                                         "chemical_formula", "physical_form")}
+        comps = [c for c in s.get("components") or [] if isinstance(c, dict) and c.get("name")]
+        if comps:
+            sample["components"] = "; ".join(f"{c['name']}: {c.get('chemical_formula', '')}"
+                                             + (f" ({c['space_group']})" if c.get("space_group") else "")
+                                             for c in comps)
         sample["atom_types"] = ", ".join(md.atom_types_of(meta)) or None
         sample["is_simulation"] = bool(s.get("is_simulation"))
         sample["preparation_date"] = md.to_iso(s.get("preparation_date")) or None
@@ -110,7 +115,7 @@ def eln_archive(name, meta, files, schema="plugin", eln_data_file="", nxem_files
             pass
         sample["history"] = richtext.sanitize(s.get("history") or "")
         data["sample_info"] = sample
-        ii = {k: ins.get(k) for k in ("name", "location", "type", "vendor", "model", "serial_number",
+        ii = {k: ins.get(k) for k in ("name", "location", "type", "vendor", "model", "serial_number", "identifier",
                                        "operation_mode", "emitter_type", "detectors")}
         try:
             if ins.get("voltage_kV") not in (None, ""):
@@ -134,6 +139,10 @@ def eln_archive(name, meta, files, schema="plugin", eln_data_file="", nxem_files
         data["nxem_files"] = list(nxem_files) or None
         if src.get("elabftw_url"):
             data["elabftw_entry"] = src.get("elabftw_url")
+        if src.get("eln_file"):
+            data["eln_file"] = src["eln_file"]
+        if src.get("session_path"):
+            data["acquisition_folder"] = src["session_path"]
     else:
         extra = []
         hist = richtext.sanitize(s.get("history") or "")
@@ -334,8 +343,8 @@ def meta_from_archive(arch):
     if d.get("project_name"):
         m["project"]["name"] = d["project_name"]
     si = d.get("sample_info") or {}
-    for k in ("name", "identifier_sample", "identifier_parent", "chemical_formula", "atom_types", "physical_form",
-              "preparation_date", "thickness", "thickness_unit", "history"):
+    for k in ("name", "identifier_sample", "identifier_owner", "identifier_parent", "chemical_formula", "atom_types",
+              "physical_form", "preparation_date", "thickness", "thickness_unit", "history"):
         if si.get(k) not in (None, ""):
             m["sample"][k] = si[k]
     m["sample"]["is_simulation"] = bool(si.get("is_simulation"))

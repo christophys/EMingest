@@ -36,10 +36,14 @@ class TEMSampleInfo(ArchiveSection):
     m_def = Section(label="Sample")
     name = Quantity(type=str, a_eln=ELNAnnotation(component=S))
     identifier_sample = Quantity(type=str, description="ID of the sample", a_eln=ELNAnnotation(component=S))
+    identifier_owner = Quantity(type=str, description="the ID given by the owner of the sample",
+                                a_eln=ELNAnnotation(component=S))
     identifier_parent = Quantity(type=str, description="ID of the material / wafer the sample comes from",
                                  a_eln=ELNAnnotation(component=S))
     chemical_formula = Quantity(type=str, a_eln=ELNAnnotation(component=S))
     atom_types = Quantity(type=str, description="elements, comma-separated", a_eln=ELNAnnotation(component=S))
+    components = Quantity(type=str, description="components of a composite / multilayer sample: name: formula "
+                                                "(space group); ...", a_eln=ELNAnnotation(component=S))
     is_simulation = Quantity(type=bool, default=False, a_eln=ELNAnnotation(component=B))
     preparation_date = Quantity(type=str, description="ISO 8601", a_eln=ELNAnnotation(component=S))
     physical_form = Quantity(type=str, a_eln=ELNAnnotation(component=S))
@@ -58,6 +62,7 @@ class TEMInstrumentInfo(ArchiveSection):
     vendor = Quantity(type=str, a_eln=ELNAnnotation(component=S))
     model = Quantity(type=str, a_eln=ELNAnnotation(component=S))
     serial_number = Quantity(type=str, a_eln=ELNAnnotation(component=S))
+    identifier = Quantity(type=str, description="persistent ID of the microscope", a_eln=ELNAnnotation(component=S))
     acceleration_voltage = Quantity(type=float, unit="V", a_eln=ELNAnnotation(component=N, defaultDisplayUnit="kV"))
     emitter_type = Quantity(type=str, a_eln=ELNAnnotation(component=S))
     operation_mode = Quantity(type=str, a_eln=ELNAnnotation(component=S))
@@ -97,6 +102,10 @@ class ELNTEMExperiment(Measurement, EntryData):
     project_name = Quantity(type=str, a_eln=ELNAnnotation(component=S))
     elabftw_entry = Quantity(type=str, description="the experiment / resource in elabFTW",
                              a_eln=ELNAnnotation(component=U))
+    eln_file = Quantity(type=str, description="the elabFTW export (.eln) the metadata were read from",
+                        a_eln=ELNAnnotation(component=S))
+    acquisition_folder = Quantity(type=str, description="folder of the acquisitions as recorded in the session",
+                                  a_eln=ELNAnnotation(component=S))
     eln_data_file = Quantity(type=str, description="metadata for pynxtools (eln_data.yaml)",
                              a_browser=dict(adaptor="RawFileAdaptor"), a_eln=ELNAnnotation(component=F))
     nxem_files = Quantity(type=str, shape=["*"], a_browser=dict(adaptor="RawFileAdaptor"))

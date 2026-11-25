@@ -155,6 +155,8 @@ def _id_type(v):
         return "URL"
     if lv.startswith("elabftw:"):
         return "elabFTW"
+    if re.match(r"^\d{8}-[0-9a-f]{8,}$", lv):
+        return "eLabFTW elabid"
     return "local"
 
 
@@ -173,12 +175,19 @@ def add_extra_metadata(template, eln):
     for k in ("vendor", "model", "serial_number"):
         if ins.get(k):
             template[f"{base}/fabrication/{k}"] = str(ins[k])
+    if ins.get("identifier"):
+        template[f"{base}/identifierNAME[identifier_instrument]"] = str(ins["identifier"])
+        template[f"{base}/identifierNAME[identifier_instrument]/@type"] = _id_type(str(ins["identifier"]))
     v = ins.get("voltage")
     if isinstance(v, dict) and v.get("value") is not None:
         template[f"{base}/ebeam_column/electron_source/voltage"] = float(v["value"])
         template[f"{base}/ebeam_column/electron_source/voltage/@units"] = str(v.get("unit") or "kV")
     if ins.get("operation_mode"):
         template[f"{base}/ebeam_column/operation_mode"] = str(ins["operation_mode"])
+    e = eln.get("entry") or {}
+    if e.get("identifier_experiment") and not template.get(f"/ENTRY[entry{ENTRY}]/identifier_experiment"):
+        template[f"/ENTRY[entry{ENTRY}]/identifier_experiment"] = str(e["identifier_experiment"])
+        template[f"/ENTRY[entry{ENTRY}]/identifier_experiment/@type"] = _id_type(str(e["identifier_experiment"]))
     s = eln.get("sample") or {}
     sb = f"/ENTRY[entry{ENTRY}]/sampleID[sample]"
     for k in ("identifier_sample", "identifier_parent", "physical_form", "description"):
@@ -186,6 +195,18 @@ def add_extra_metadata(template, eln):
             template[f"{sb}/{k}"] = str(s[k])
             if k.startswith("identifier"):
                 template[f"{sb}/{k}/@type"] = _id_type(str(s[k]))
+    if s.get("identifier_owner"):
+        template[f"{sb}/identifierNAME[identifier_owner]"] = str(s["identifier_owner"])
+        template[f"{sb}/identifierNAME[identifier_owner]/@type"] = "sample owner identifier"
+    for i, c in enumerate(s.get("components") or [], start=1):
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        cg = f"{sb}/SAMPLE_COMPONENT[component{i}]"
+        template[f"{cg}/name"] = str(c["name"])
+        if c.get("chemical_formula"):
+            template[f"{cg}/chemical_formula"] = str(c["chemical_formula"]).replace(" ", "")
+        if c.get("space_group"):
+            template[f"{cg}/space_group"] = str(c["space_group"])
     if s.get("atom_types") and not template.get(f"{sb}/atom_types"):
         template[f"{sb}/atom_types"] = str(s["atom_types"])
     for k in list(template.keys()):                     # pynxtools-em: ORCID as undocumented "identifier" (DOI)

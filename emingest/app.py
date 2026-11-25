@@ -212,8 +212,8 @@ class App:
         self.log(f"added {len(paths)} file(s)")
         return len(paths)
 
-    def _add_file(self, path, source, copy=False, inspect_now=False):
-        name = os.path.basename(path)
+    def _add_file(self, path, source, copy=False, inspect_now=False, name=None):
+        name = name or os.path.basename(path)
         with self.lock:
             if name in self.files and self.files[name]["path"] != path:
                 name = self._unique(name)
@@ -243,6 +243,8 @@ class App:
                 self.files[name].update(info, ready=True)
         self._render_table()
         self._refresh_meta_files()
+        if name.lower().endswith(".eln"):
+            self._refresh_eln_choices()
 
     def wait_inspected(self, timeout=600):
         t0 = time.time()
@@ -311,7 +313,17 @@ class App:
             infos = [f for f in self.files.values() if f["ready"]]
         hints = md.from_file_hints(infos)
         n = sum(len(v) for v in hints.values())
-        self.set_meta(md.merge(self.get_meta(), hints))
+        cur = self.get_meta()
+        for f in infos:                         # NXem files (e.g. written by tem-provenance): their metadata
+            if f.get("format") == "NeXus" and "NXem" in str(f.get("note")):
+                try:
+                    nx = md.from_nxem(f["path"])
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"{f['name']}: {e}")
+                    continue
+                cur = md.merge(cur, nx)
+                n += sum(1 for sec in ("entry", "sample", "instrument") for v in nx[sec].values() if v)
+        self.set_meta(md.merge(cur, hints))
         self.log(f"{n} value(s) from the files put into empty fields of tab 2" if n else
                  "no acquisition metadata found in the files")
 
@@ -379,6 +391,9 @@ class App:
                         f"application definition (pynxtools); the description and the sample history (rich text) "
                         f"go to the NOMAD ELN entry, as plain text also into NXem.</small>")
         exp, proj, tags, sample, instr = blocks
+        self._components = []
+        self.w_components = W.HTML()
+        sample.children = tuple(sample.children) + (self.w_components,)
         return W.VBox([legend, self.w_check, W.HBox([W.HTML("Reuse metadata:", layout=_L(width="120px")),
                                                      self.w_meta_src, self.w_meta_overwrite, b_load])]
                       + rich[:2] + [exp, proj, tags, users, sample] + rich[2:] + [instr])
@@ -420,6 +435,8 @@ class App:
         m["users"] = m["users"] or [{}]
         m["tags"] = [t.strip() for t in self.w_tags.value.split(",") if t.strip()]
         m["source"] = dict(getattr(self, "_source", {}) or {})
+        if getattr(self, "_components", None):
+            m["sample"]["components"] = [dict(c) for c in self._components]
         return m
 
     def set_meta(self, m):
@@ -443,6 +460,13 @@ class App:
             self._add_user_row(u)
         self.w_tags.value = ", ".join(m.get("tags") or [])
         self._source = dict(m.get("source") or {})
+        if "components" in (m.get("sample") or {}):
+            self._components = [dict(c) for c in m["sample"]["components"] or [] if isinstance(c, dict)]
+            self.w_components.value = ("<small style='margin-left:174px'>components (from eLabFTW / the files): " +
+                                       html.escape("; ".join(f"{c.get('name')}: {c.get('chemical_formula', '')}"
+                                                             + (f" ({c['space_group']})" if c.get("space_group")
+                                                                else "") for c in self._components)) + "</small>"
+                                       if self._components else "")
         self._refresh_check()
 
     def _refresh_check(self):
@@ -484,6 +508,10 @@ class App:
 
     # ------------------------------------------------------------------ tab 3: elabFTW
     def _elab_tab(self):
+        lab = lambda t: W.HTML(t, layout=_L(width="130px"))  # noqa: E731
+        self.w_el_src = W.ToggleButtons(options=[("elabFTW server (API)", "api"), (".eln export file", "eln")],
+                                        value="api", style={"button_width": "170px"})
+        # --- server
         self.w_el_url = W.Text(value=self._elab_url, placeholder="https://eln.example.org  or the address of the "
                                                                      "entry (…/experiments.php?mode=view&id=42)",
                                layout=_L(width="560px"))
@@ -493,47 +521,223 @@ class App:
         self.w_el_key = W.Password(placeholder="API key (elabFTW: user panel → API keys; read access is enough)",
                                    layout=_L(width="560px"))
         self.w_el_verify = W.Checkbox(value=True, description="verify the TLS certificate", indent=False,
-                                     layout=_L(width="auto"))
+                                      layout=_L(width="auto"))
+        box_api = W.VBox([W.HBox([lab("elabFTW address"), self.w_el_url]),
+                          W.HBox([lab("entry"), self.w_el_type, W.HTML("&nbsp;ID&nbsp;"), self.w_el_id]),
+                          W.HBox([lab("API key"), self.w_el_key]), W.HBox([lab(""), self.w_el_verify])])
+        # --- .eln file
+        self.w_eln_loc = W.Text(placeholder="/path/export.eln  ·  user@host:/var/elabftw/exports/  (folder: the "
+                                            "newest .eln)  ·  or choose a file of tab 1 →", layout=_L(width="560px"))
+        self.w_eln_tab1 = W.Dropdown(options=[("(.eln files of tab 1)", "")], layout=_L(width="250px"))
+        b_open = W.Button(description="open", icon="folder-open", layout=_L(width="90px"))
+        b_open.on_click(lambda _: threading.Thread(target=self._eln_open, daemon=True).start())
+        self.w_eln_filter = W.ToggleButtons(options=[("TEM sessions", "sessions"), ("experiments", "experiments"),
+                                                     ("resources", "items"), ("all", "all")], value="sessions",
+                                            style={"button_width": "110px"})
+        self.w_eln_filter.observe(lambda _ch: self._eln_list(), names="value")
+        self.w_eln_entries = W.Select(options=[], rows=7, layout=_L(width="760px"))
+        self.w_eln_info = W.HTML()
+        box_eln = W.VBox([W.HBox([lab(".eln file"), self.w_eln_loc, self.w_eln_tab1, b_open]), self.w_eln_info,
+                          W.HBox([lab("show"), self.w_eln_filter]), W.HBox([lab("entry"), self.w_eln_entries])])
+        # --- SSH (for an .eln file or acquisition folders on another computer)
+        self.w_ssh_pw = W.Password(placeholder="SSH password (or a key below)", layout=_L(width="270px"))
+        self.w_ssh_key = W.Textarea(placeholder="private key (-----BEGIN OPENSSH PRIVATE KEY----- …), optional",
+                                    layout=_L(width="420px", height="58px"))
+        self.w_ssh_pass = W.Password(placeholder="key passphrase", layout=_L(width="160px"))
+        self.w_ssh_trust = W.Text(placeholder="accepted host key (SHA256:…)", layout=_L(width="420px"))
+        self.w_ssh_info = W.HTML("<small>For locations <code>user@host:/path</code>. Host keys are checked against "
+                                 "known_hosts; an unknown host shows its fingerprint to compare and accept. "
+                                 "Credentials stay in this session's memory.</small>")
+        self.box_ssh = W.VBox([W.HBox([lab("SSH"), self.w_ssh_pw, self.w_ssh_pass]),
+                               W.HBox([lab(""), self.w_ssh_key]), W.HBox([lab("host key"), self.w_ssh_trust]),
+                               W.HBox([lab(""), self.w_ssh_info])])
+        acc_ssh = W.Accordion(children=[self.box_ssh])
+        acc_ssh.set_title(0, "SSH access (remote .eln file or acquisition folders)")
+        acc_ssh.selected_index = None
+        self.w_el_src.observe(lambda _ch: self._el_src_vis(), names="value")
+        self.box_api, self.box_eln = box_api, box_eln
+        # --- common
         self.w_el_links = W.Checkbox(value=True, description="also read linked resources (e.g. the sample)",
-                                     indent=False)
+                                     indent=False, layout=_L(width="auto"))
+        self.w_el_tz = W.Text(value="Europe/Rome", description="facility time zone",
+                              style={"description_width": "initial"}, layout=_L(width="300px"))
         b_fetch = W.Button(description="read entry", icon="search", button_style="primary",
                            layout=_L(width="140px"))
         b_fetch.on_click(lambda _: self._elab_fetch())
         self.w_el_status = W.HTML()
         self.w_el_preview = W.HTML()
-        self.w_el_files = W.SelectMultiple(options=[], rows=6, layout=_L(width="560px"))
+        self.w_el_files = W.SelectMultiple(options=[], rows=5, layout=_L(width="560px"))
         self.w_el_overwrite = W.Checkbox(value=False, description="overwrite fields that are already filled",
-                                         indent=False)
+                                         indent=False, layout=_L(width="auto"))
         b_meta = W.Button(description="use metadata", icon="check", layout=_L(width="150px"))
         b_meta.on_click(lambda _: self._elab_apply())
         b_dl = W.Button(description="add selected attachments", icon="download", layout=_L(width="220px"))
         b_dl.on_click(lambda _: threading.Thread(target=self._elab_download, daemon=True).start())
         self.w_el_dl = W.HTML()
-        lab = lambda t: W.HTML(t, layout=_L(width="130px"))  # noqa: E731
+        # --- acquisition folder of a TEM session
+        self.w_map = W.Text(value=os.environ.get("EMINGEST_PATH_MAP", ""),
+                            placeholder="path mapping: /mnt/storage=/data/lab ; /mnt/tem=user@storage:/tem",
+                            layout=_L(width="560px"))
+        self.w_acq = W.HTML()
+        b_acq = W.Button(description="add the files of the acquisition folder", icon="download",
+                         layout=_L(width="300px"))
+        b_acq.on_click(lambda _: threading.Thread(target=self._session_files, daemon=True).start())
+        self.box_acq = W.VBox([W.HTML("<b>Acquisition folder of the session</b> <small>(the <code>Path</code> "
+                                      "of the session; with a mapping when it is mounted elsewhere here or lies "
+                                      "on another computer)</small>"),
+                               W.HBox([lab("path mapping"), self.w_map]), W.HBox([lab(""), b_acq]), self.w_acq],
+                              layout=_L(display="none"))
+        # --- batch
+        self.w_b_ids = W.Text(placeholder="session IDs: 12, 15-18", layout=_L(width="300px"))
+        self.w_b_all = W.Checkbox(value=False, description="all TEM sessions of the .eln file", indent=False,
+                                  layout=_L(width="auto"))
+        self.w_b_folder = W.Text(value="tem/session_{id}_{title}", description="folder",
+                                 style={"description_width": "50px"}, layout=_L(width="360px"))
+        b_check = W.Button(description="check", icon="list-check", layout=_L(width="100px"))
+        b_check.on_click(lambda _: threading.Thread(target=self._batch, kwargs=dict(dry_run=True),
+                                                    daemon=True).start())
+        self.w_b_run = W.Button(description="ingest into NOMAD", icon="cloud-upload", button_style="success",
+                                layout=_L(width="190px"))
+        self.w_b_run.on_click(lambda _: threading.Thread(target=self._batch, daemon=True).start())
+        self.w_b_status = W.HTML()
+        self.w_b_table = W.HTML()
+        box_batch = W.VBox([
+            W.HTML("<small>Each TEM session becomes its own folder in the NOMAD project of tab 4 (ELN entry with "
+                   "the metadata of session, sample and microscope; all files of its acquisition folder; NXem "
+                   "conversion as chosen in tab 4). Uses the source, SSH access, time zone and path mapping "
+                   "above.</small>"),
+            W.HBox([lab("sessions"), self.w_b_ids, self.w_b_all]), W.HBox([lab(""), self.w_b_folder]),
+            W.HBox([lab(""), b_check, self.w_b_run]), self.w_b_status, self.w_b_table])
+        acc_batch = W.Accordion(children=[box_batch])
+        acc_batch.set_title(0, "Batch: several TEM sessions → NOMAD")
+        acc_batch.selected_index = None
+        self._el_src_vis()
         return W.VBox([
-            W.HTML("<small>Reads an experiment or a resource of <b>elabFTW</b> (API v2): title, date, main text, "
-                   "tags, author, extra fields (sample, formula, microscope, high tension …), linked resources "
-                   "(e.g. the sample) and attachments. The API key is used only for this session.</small>"),
-            W.HBox([lab("elabFTW address"), self.w_el_url]),
-            W.HBox([lab("entry"), self.w_el_type, W.HTML("&nbsp;ID&nbsp;"), self.w_el_id]),
-            W.HBox([lab("API key"), self.w_el_key]),
-            W.HBox([lab(""), self.w_el_verify, self.w_el_links]),
+            W.HTML("<small>Reads experiments and resources of <b>elabFTW</b> — from a running server (API v2) or "
+                   "from an <b>.eln export</b> (<code>bin/console export:eln</code>, here or on another computer) "
+                   "without a running elabFTW. <b>TEM sessions</b> made with the tem-provenance templates are "
+                   "followed to their sample and microscope, and the files of their acquisition folder can be "
+                   "added. API key and SSH credentials stay in this session's memory.</small>"),
+            W.HBox([lab("source"), self.w_el_src]), box_api, box_eln, acc_ssh,
+            W.HBox([lab(""), self.w_el_links, self.w_el_tz]),
             W.HBox([lab(""), b_fetch]), self.w_el_status, self.w_el_preview,
             W.HBox([lab("metadata"), b_meta, self.w_el_overwrite]),
-            W.HBox([lab("attachments"), self.w_el_files]), W.HBox([lab(""), b_dl]), self.w_el_dl])
+            W.HBox([lab("attachments"), self.w_el_files]), W.HBox([lab(""), b_dl]), self.w_el_dl,
+            self.box_acq, acc_batch])
+
+    def _el_src_vis(self):
+        api = self.w_el_src.value == "api"
+        self.box_api.layout.display = "flex" if api else "none"
+        self.box_eln.layout.display = "none" if api else "flex"
+        if not api:
+            self._refresh_eln_choices()
+
+    def _refresh_eln_choices(self):
+        with self.lock:
+            opts = [(n, n) for n in self.files if n.lower().endswith(".eln")]
+        self.w_eln_tab1.options = [("(.eln files of tab 1)", "")] + opts
+
+    def _ssh_kw(self):
+        kw = {}
+        if self.w_ssh_pw.value:
+            kw["password"] = self.w_ssh_pw.value
+        if self.w_ssh_key.value.strip():
+            kw["key_text"] = self.w_ssh_key.value.strip() + "\n"
+            kw["key_passphrase"] = self.w_ssh_pass.value or None
+        if self.w_ssh_trust.value.strip():
+            kw["trust_fingerprint"] = self.w_ssh_trust.value.strip()
+        return kw
+
+    def _local_roots(self):
+        """Folders of the server the dashboard may read (server mode: EMINGEST_LOCAL_ROOTS); None = any."""
+        if not self.server_mode:
+            return None
+        return [p for p in os.environ.get("EMINGEST_LOCAL_ROOTS", "").split(os.pathsep) if p]
+
+    def _remote_error(self, e, w):
+        from .remote import UnknownHostKey
+        if isinstance(e, UnknownHostKey):
+            self.w_ssh_trust.value = e.fingerprint
+            w.value = (f"<span style='color:#b26a00'>The host key of <b>{html.escape(e.host)}</b> is not known: "
+                       f"{html.escape(e.key_type)} <code>{html.escape(e.fingerprint)}</code>. Compare it with the "
+                       f"key of the server (<code>ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub</code> there); if it "
+                       f"matches, it is now entered under <i>SSH access → host key</i>: try again.</span>")
+        else:
+            w.value = _ok(str(e), False)
+
+    def _eln_open(self):
+        from .eln_archive import ElnArchive, ElnArchiveClient
+        from .remote import RemoteError, open_eln
+        self.w_eln_info.value = "<i>opening …</i>"
+        try:
+            if getattr(self, "_eln_loc", None):
+                self._eln_loc.close()
+                self._eln_loc = None
+            if self.w_eln_tab1.value:
+                arch = ElnArchive(self.files[self.w_eln_tab1.value]["path"], name=self.w_eln_tab1.value)
+            else:
+                arch, self._eln_loc = open_eln(self.w_eln_loc.value, dest_dir=self.work_dir,
+                                               allowed_local_roots=self._local_roots(), **self._ssh_kw())
+        except (RemoteError, elab.ElabError) as e:
+            self._remote_error(e, self.w_eln_info)
+            return
+        except Exception as e:  # noqa: BLE001
+            self.w_eln_info.value = _ok(f"cannot open: {e!r}", False)
+            self.log(traceback.format_exc())
+            return
+        self.eln_archive = arch
+        self.elab_client = ElnArchiveClient(arch)
+        n = {t: sum(1 for e in arch.entries.values() if e["type"] == t) for t in ("experiments", "items")}
+        from . import tem_session as ts
+        ns = len(ts.list_sessions(arch))
+        self.w_eln_info.value = _ok(f"✔ {arch.name}: {n['experiments']} experiment(s) ({ns} TEM session(s)), "
+                                    f"{n['items']} resource(s)" + (f"; {arch.software}" if arch.software else ""))
+        self._eln_list()
+
+    def _eln_list(self):
+        arch = getattr(self, "eln_archive", None)
+        if arch is None:
+            return
+        from . import tem_session as ts
+        f = self.w_eln_filter.value
+        if f == "sessions":
+            rows = [(f"session #{s['id']} · {str(s['date'])[:16]} · {s['title']} · {s['path']}", ("experiments",
+                                                                                               s["id"]))
+                    for s in ts.list_sessions(arch)]
+        else:
+            rows = [(f"{'experiment' if e['type'] == 'experiments' else 'resource'} #{e['id']} · "
+                     f"{str(e['date'])[:10]} · {e['title']}" + (f" · {e['category']}" if e["category"] else "")
+                     + (f" · {e['files']} file(s)" if e["files"] else ""), (e["type"], e["id"]))
+                    for e in arch.list(types=None if f == "all" else (f,))]
+        self.w_eln_entries.options = rows
+        if rows:
+            self.w_eln_entries.value = rows[0][1]
+
+    def _elab_source(self):
+        """(client, type, id) of the entry chosen in the API or .eln part."""
+        if self.w_el_src.value == "eln":
+            if getattr(self, "eln_archive", None) is None:
+                raise elab.ElabError("open an .eln file first")
+            if not self.w_eln_entries.value:
+                raise elab.ElabError("choose an entry of the .eln file")
+            etype, eid = self.w_eln_entries.value
+            return self.elab_client, etype, eid
+        base, etype, eid = elab.parse_ref(self.w_el_url.value, self.w_el_id.value.strip() or None,
+                                          self.w_el_type.value if not re.search(
+                                              r"(experiments|database|resources)\.php|/api/v2/",
+                                              self.w_el_url.value) else None)
+        self.w_el_type.value = etype
+        self.w_el_id.value = str(eid)
+        self.elab_client = elab.ElabClient(base, self.w_el_key.value, verify=self.w_el_verify.value)
+        return self.elab_client, etype, eid
 
     def _elab_fetch(self):
         self.w_el_status.value = "<i>reading …</i>"
         try:
-            base, etype, eid = elab.parse_ref(self.w_el_url.value, self.w_el_id.value.strip() or None,
-                                              self.w_el_type.value if not re.search(
-                                                  r"(experiments|database|resources)\.php|/api/v2/",
-                                                  self.w_el_url.value) else None)
-            self.w_el_type.value = etype
-            self.w_el_id.value = str(eid)
-            self.elab_client = elab.ElabClient(base, self.w_el_key.value, verify=self.w_el_verify.value)
-            r = elab.import_entry(self.elab_client, etype, eid, follow_links=self.w_el_links.value)
-        except elab.ElabError as e:
+            client, etype, eid = self._elab_source()
+            r = elab.import_entry(client, etype, eid, follow_links=self.w_el_links.value,
+                                  zone=self.w_el_tz.value.strip() or None)
+        except (elab.ElabError, ValueError) as e:
             self.w_el_status.value = _ok(str(e), False)
             return None
         except Exception as e:  # noqa: BLE001
@@ -543,10 +747,16 @@ class App:
         self.elab_result = r
         self.w_el_status.value = _ok("✔ " + r["summary"])
         m = r["meta"]
-        items = [("title", m["entry"].get("experiment_alias")), ("date", m["entry"].get("start_time")),
-                 ("sample", m["sample"].get("name")), ("formula", m["sample"].get("chemical_formula")),
+        items = [("title", m["entry"].get("experiment_alias")), ("start", m["entry"].get("start_time")),
+                 ("end", m["entry"].get("end_time")), ("sample", m["sample"].get("name")),
+                 ("sample ID (eLabFTW)", m["sample"].get("identifier_sample")),
+                 ("owner's sample ID", m["sample"].get("identifier_owner")),
+                 ("formula", m["sample"].get("chemical_formula")), ("elements", m["sample"].get("atom_types")),
+                 ("components", "; ".join(f"{c.get('name')}: {c.get('chemical_formula')}"
+                                          for c in m["sample"].get("components") or [])),
                  ("microscope", m["instrument"].get("name") or m["instrument"].get("model")),
                  ("high tension (kV)", m["instrument"].get("voltage_kV")),
+                 ("acquisition folder", (m.get("source") or {}).get("session_path")),
                  ("users", ", ".join(u.get("name", "") for u in m["users"])), ("tags", ", ".join(m["tags"]))]
         rows = "".join(f"<tr><td style='padding:0 10px;color:#555'>{k}</td><td>{html.escape(str(v))}</td></tr>"
                        for k, v in items if v not in (None, ""))
@@ -557,7 +767,113 @@ class App:
         self.w_el_files.options = [(f"{u.get('real_name')}  ({_mb(u.get('filesize'))})", i)
                                    for i, u in enumerate(r["uploads"])]
         self.w_el_files.value = tuple(range(len(r["uploads"])))
+        self.box_acq.layout.display = "flex" if r.get("session") else "none"
+        self.w_acq.value = ""
         return r
+
+    def _session_files(self):
+        """Files of the acquisition folder of the session read last -> tab 1 (time-window check)."""
+        from . import ingest
+        from . import tem_session as ts
+        s = (self.elab_result or {}).get("session")
+        if not s:
+            self.w_acq.value = _ok("read a TEM session first", False)
+            return
+        dest = tempfile.mkdtemp(prefix="acq_", dir=self.work_dir)
+        try:
+            pairs, label = ingest.collect_session_files(
+                s["path"], dest, location_kw=self._ssh_kw(), rules=ts.parse_rules(self.w_map.value),
+                allowed_local_roots=self._local_roots(),
+                progress=lambda rel, d, t: setattr(self.w_acq, "value", f"<span style='color:#1565c0'>⬇ "
+                                                   f"{html.escape(rel)}: {100 * d / max(t, 1):.0f} %</span>"))
+        except Exception as e:  # noqa: BLE001
+            self._remote_error(e, self.w_acq)
+            return
+        names = []
+        for p, rel in pairs:
+            names.append(self._add_file(p, "acquisition folder", name=rel.replace("/", "_") if "/" in rel else None))
+        self.w_acq.value = f"<i>{len(names)} file(s) from {html.escape(label)}: inspecting …</i>"
+        self.wait_inspected()
+        with self.lock:
+            infos = [self.files[n] for n in names if n in self.files]
+        n_out = ingest.flag_window(infos, s["window"], s["zone"])
+        self._render_table()
+        self.w_acq.value = _ok(f"✔ {len(names)} file(s) of {label} added to tab 1" +
+                               (f"; {n_out} acquired outside the session time (marked)" if n_out else ""))
+
+    def _batch(self, dry_run=False):
+        from . import ingest
+        from . import tem_session as ts
+        if self._busy:
+            return
+        self._busy = True
+        self.w_b_run.disabled = True
+        rows = []
+        try:
+            if self.w_el_src.value == "eln":
+                if getattr(self, "eln_archive", None) is None:
+                    raise ValueError("open an .eln file first")
+                source = self.elab_client
+            else:
+                base = elab.parse_ref(self.w_el_url.value, 1, "experiments")[0]
+                source = elab.ElabClient(base, self.w_el_key.value, verify=self.w_el_verify.value)
+            if self.w_b_all.value:
+                if self.w_el_src.value != "eln":
+                    raise ValueError("'all TEM sessions' needs an .eln file; give the IDs for a server")
+                ids = [s["id"] for s in ts.list_sessions(source)]
+            else:
+                ids = ts.parse_ids(self.w_b_ids.value)
+            if not ids:
+                raise ValueError("give session IDs (e.g. 12, 15-18)")
+            client, uid = None, None
+            if not dry_run:
+                if not self.client and not self.connect():
+                    raise ValueError("not connected to NOMAD (tab 4)")
+                client = self.client
+                uid = self.project.w_sel.value
+                if uid in (None, NEW):
+                    if uid == NEW and not self.project.can_create():
+                        raise ValueError("the maximum number of open NOMAD projects is reached: choose an existing "
+                                         "project")
+                    uid = create_project(client.url, client.token, self.project.w_name.value.strip()
+                                         or f"TEM sessions {time.strftime('%Y-%m-%d')}")
+                    self.project.refresh(select=uid)
+            for k, sid in enumerate(ids):
+                def cb(stage, msg, k=k):
+                    self.w_b_status.value = f"<i>{k + 1}/{len(ids)} · {html.escape(msg)}</i>"
+                r = ingest.ingest_session(
+                    source, sid, client=client, upload_id=uid, zone=self.w_el_tz.value.strip() or ts.DEFAULT_TZ,
+                    rules=ts.parse_rules(self.w_map.value), location_kw=self._ssh_kw(),
+                    folder_template=self.w_b_folder.value.strip() or "tem/session_{id}_{title}",
+                    schema="plugin" if self.w_schema.value else "core", conversion=self.w_conv.value,
+                    max_gb=self.w_max_gb.value, work_dir=self.work_dir, callback=cb, dry_run=dry_run,
+                    allowed_local_roots=self._local_roots())
+                rows.append(r)
+                self.w_b_table.value = self._batch_html(rows)
+            ok = sum(1 for r in rows if r["status"] in ("ok", "checked"))
+            self.w_b_status.value = _ok(f"✔ {ok} of {len(rows)} session(s) " + ("checked" if dry_run else
+                                                                               "ingested"), ok == len(rows))
+            if not dry_run:
+                self._list_uploads()
+        except Exception as e:  # noqa: BLE001
+            self._remote_error(e, self.w_b_status)
+            self.log(traceback.format_exc())
+        finally:
+            self._busy = False
+            self.w_b_run.disabled = False
+
+    def _batch_html(self, rows):
+        def st(r):
+            return {"ok": "✔", "checked": "✔", "failed": "✖"}.get(r["status"], "–") + " " + r["status"]
+        tr = "".join(
+            f"<tr><td style='padding:0 8px'>#{html.escape(str(r['session']))}</td>"
+            f"<td style='padding:0 8px'>{html.escape(str(r.get('title') or ''))}</td>"
+            f"<td style='padding:0 8px'>{st(r)}</td><td style='padding:0 8px'>{html.escape(r.get('folder') or '')}"
+            f"</td><td style='padding:0 8px'><small>{html.escape(r.get('message') or '')}"
+            + (f" · missing: {html.escape(', '.join(r['missing']))}" if r.get("missing") else "")
+            + "</small></td></tr>" for r in rows)
+        return ("<table style='font-size:13px'><tr><th>session</th><th>title</th><th>status</th><th>folder</th>"
+                f"<th></th></tr>{tr}</table>")
 
     def _elab_apply(self):
         if not self.elab_result:
@@ -702,36 +1018,19 @@ class App:
             raise ValueError("no files: add files in tab 1")
         out = tempfile.mkdtemp(prefix="out_", dir=self.work_dir) if self.server_mode or not report else \
             os.path.join(self.out_root, f"{name}_{time.strftime('%Y%m%d_%H%M%S')}")
-        os.makedirs(out, exist_ok=True)
-        data = [f for f in fl if not f["name"].lower().endswith(("eln_data.yaml", ".archive.yaml",
-                                                                  ".archive.json"))]
-        flist = [dict(path=f"{folder}/{f['name']}", kind=self.kind(f), format=f.get("format"),
-                     shape=f.get("shape"), size=f.get("size"), note=f.get("note")) for f in data]
-        schema = "plugin" if self.w_schema.value else "core"
-        paths = elnm.write_eln(out, name, meta, flist, prefix=folder, schema=schema)
-        items = [(f["path"], f["name"]) for f in data] + [(p, os.path.basename(p)) for p in paths.values()]
-        conversion = conversion or self.w_conv.value
-        results = []
-        if conversion == "local":
-            nxdir = os.path.join(out, "nxem")
+        from . import ingest
 
-            def cb(i, n, nm):
-                self.w_push_status.value = (f"<span style='color:#1565c0'>NXem conversion {i + 1 if nm else n} of "
-                                            f"{n}: {html.escape(nm)}</span>" if nm else
-                                            "<span style='color:#1565c0'>NXem conversion done</span>")
-            results = cv.convert_all([f["path"] for f in data], paths["eln_data"], nxdir, callback=cb,
-                                     max_gb=self.w_max_gb.value)
-            by_local = {f["path"]: f"{folder}/{f['name']}" for f in data}
-            ok = [r for r in results if r["status"] == "ok"]
-            items += [(r["output"], "nxem/" + os.path.basename(r["output"])) for r in ok]
-            rec = [dict(r, inputs=[by_local.get(p, p) for p in r["inputs"]],
-                        output=f"{folder}/nxem/{os.path.basename(r['output'])}") for r in results]
-            for r in rec:
-                r.pop("log", None)
-            arch = elnm.write_conversion(out, name, rec, [x["path"] for x in flist], prefix=folder,
-                                         eln_entry=f"{folder}/{name}.archive.yaml", schema=schema)
-            items += [(p, os.path.basename(p)) for p in arch.values()]
-            self.w_result.value = self._results_html(rec) + elnm.preview_svg(arch["workflow"])
+        def cb(i, n, nm):
+            self.w_push_status.value = (f"<span style='color:#1565c0'>NXem conversion {i + 1 if nm else n} of "
+                                        f"{n}: {html.escape(nm)}</span>" if nm else
+                                        "<span style='color:#1565c0'>NXem conversion done</span>")
+        files = [dict(f, kind=self.kind(f)) for f in fl if not f["name"].lower().endswith(".eln")]
+        ds = ingest.build_dataset(files, meta, name, folder, out, schema="plugin" if self.w_schema.value else "core",
+                                  conversion=conversion or self.w_conv.value, max_gb=self.w_max_gb.value,
+                                  callback=cb)
+        items, results = ds["items"], ds["results"]
+        if ds["workflow"]:
+            self.w_result.value = self._results_html(results) + elnm.preview_svg(ds["workflow"])
         if report:
             self.w_push_status.value = _ok(f"✔ written into {out}")
         return {"name": name, "folder": folder, "items": items, "results": results, "meta": meta, "out": out}

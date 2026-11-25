@@ -50,6 +50,7 @@ FIELDS = [
     ("project", "name", "Project", OPTIONAL, "str", "project the data belong to"),
     ("sample", "name", "Sample name", RECOMMENDED, "str", ""),
     ("sample", "identifier_sample", "Sample ID", RECOMMENDED, "str", "ID of the sample (lab ID, sample database)"),
+    ("sample", "identifier_owner", "Owner's sample ID", OPTIONAL, "str", "the ID given by the owner of the sample"),
     ("sample", "identifier_parent", "Parent sample ID", OPTIONAL, "str", "ID of the material / wafer it came from"),
     ("sample", "chemical_formula", "Chemical formula", REQUIRED, "str",
      "Hill notation, e.g. O3SrTi; or give the elements below"),
@@ -67,6 +68,8 @@ FIELDS = [
     ("instrument", "vendor", "Vendor", REQUIRED, "str", "e.g. Thermo Fisher, JEOL, Nion, Hitachi, Zeiss"),
     ("instrument", "model", "Model", REQUIRED, "str", "e.g. Titan Themis, ARM200F, HERMES"),
     ("instrument", "serial_number", "Serial number", OPTIONAL, "str", ""),
+    ("instrument", "identifier", "Instrument ID", OPTIONAL, "str", "persistent ID of the microscope (e.g. its "
+                                                                   "inventory or eLabFTW resource)"),
     ("instrument", "voltage_kV", "High tension (kV)", RECOMMENDED, "float", "acceleration voltage"),
     ("instrument", "emitter_type", "Electron source", RECOMMENDED,
      "choice:|cold field emitter|Schottky field emitter|thermionic (LaB6)|thermionic (W)|other", ""),
@@ -159,7 +162,8 @@ def atom_types_of(meta):
     """Elements of the formula (or of the elements field)."""
     from ase.data import chemical_symbols
     s = meta.get("sample") or {}
-    src = s.get("chemical_formula") or s.get("atom_types") or ""
+    src = " ".join(str(x) for x in [s.get("chemical_formula") or "", s.get("atom_types") or ""]
+                   + [c.get("chemical_formula") or "" for c in s.get("components") or [] if isinstance(c, dict)])
     found = []
     for sym in re.findall(r"[A-Z][a-z]?", str(src)):
         if sym in chemical_symbols[1:] and sym not in found:
@@ -184,9 +188,13 @@ def eln_data(meta):
     if _filled(p.get("name")):
         out["project"] = {"name": str(p["name"])}
     sm = out["sample"]
-    for k in ("name", "identifier_sample", "identifier_parent", "physical_form"):
+    for k in ("name", "identifier_sample", "identifier_owner", "identifier_parent", "physical_form"):
         if _filled(s.get(k)):
             sm[k] = str(s[k])
+    comps = [{k: str(v) for k, v in c.items() if _filled(v)} for c in s.get("components") or []
+             if isinstance(c, dict) and _filled(c.get("name"))]
+    if comps:
+        sm["components"] = comps
     sm["is_simulation"] = bool(s.get("is_simulation"))
     sm["preparation_date"] = to_iso(s.get("preparation_date")) or out["entry"]["start_time"]
     if _filled(s.get("chemical_formula")):
@@ -212,7 +220,8 @@ def eln_data(meta):
     if users:
         out["user"] = users
     insd = {}
-    for k in ("name", "location", "type", "vendor", "model", "serial_number", "operation_mode", "emitter_type"):
+    for k in ("name", "location", "type", "vendor", "model", "serial_number", "identifier", "operation_mode",
+              "emitter_type"):
         if _filled(ins.get(k)):
             insd[k] = str(ins[k])
     if _filled(ins.get("voltage_kV")):
@@ -284,10 +293,12 @@ def from_eln_data(d):
     if (d.get("project") or {}).get("name"):
         m["project"]["name"] = str(d["project"]["name"])
     s = d.get("sample") or {}
-    for k in ("name", "identifier_sample", "identifier_parent", "physical_form", "chemical_formula", "atom_types",
-              "preparation_date"):
+    for k in ("name", "identifier_sample", "identifier_owner", "identifier_parent", "physical_form",
+              "chemical_formula", "atom_types", "preparation_date"):
         if s.get(k):
             m["sample"][k] = str(s[k])
+    if s.get("components"):
+        m["sample"]["components"] = [dict(c) for c in s["components"] if isinstance(c, dict)]
     m["sample"]["is_simulation"] = bool(s.get("is_simulation"))
     th = s.get("thickness")
     if isinstance(th, dict) and th.get("value") is not None:
@@ -298,7 +309,8 @@ def from_eln_data(d):
     users = [{k: str(v) for k, v in u.items() if v} for u in d.get("user") or [] if isinstance(u, dict)]
     m["users"] = users or [{}]
     ins = d.get("instrument") or {}
-    for k in ("name", "location", "type", "vendor", "model", "serial_number", "operation_mode", "emitter_type"):
+    for k in ("name", "location", "type", "vendor", "model", "serial_number", "identifier", "operation_mode",
+              "emitter_type"):
         if ins.get(k):
             m["instrument"][k] = str(ins[k])
     v = ins.get("voltage")
@@ -307,4 +319,87 @@ def from_eln_data(d):
     if ins.get("detectors"):
         m["instrument"]["detectors"] = ", ".join(ins["detectors"]) if isinstance(ins["detectors"], list) \
             else str(ins["detectors"])
+    return m
+
+
+def from_nxem(path):
+    """Metadata from an NXem file (e.g. one written by tem-provenance or by pynxtools-em): entry, sample (with
+    identifiers and components), users, instrument."""
+    import h5py
+
+    def txt(g, k):
+        if g is None or k not in g:
+            return ""
+        v = g[k][()]
+        if hasattr(v, "decode"):
+            v = v.decode()
+        if hasattr(v, "tolist"):
+            v = v.tolist()
+        return v if not isinstance(v, (list, tuple)) else ", ".join(str(x) for x in v)
+
+    m = empty()
+    with h5py.File(path, "r") as f:
+        entries = [f[k] for k in f if isinstance(f[k], h5py.Group) and txt(f[k], "definition") == "NXem"]
+        if not entries:
+            return m
+        e = entries[0]
+        for k in ("experiment_alias", "start_time", "end_time", "identifier_experiment"):
+            if txt(e, k):
+                m["entry"][k] = str(txt(e, k))
+        if txt(e, "experiment_description"):
+            m["entry"]["experiment_description"] = richtext.from_text(str(txt(e, "experiment_description")))
+        smp = next((e[k] for k in e if isinstance(e[k], h5py.Group) and e[k].attrs.get("NX_class") in
+                    (b"NXsample", "NXsample")), None)
+        if smp is not None:
+            s = m["sample"]
+            for k in ("name", "identifier_sample", "identifier_parent", "chemical_formula", "atom_types",
+                      "physical_form", "preparation_date"):
+                if txt(smp, k):
+                    s[k] = str(txt(smp, k))
+            if txt(smp, "identifier_owner"):
+                s["identifier_owner"] = str(txt(smp, "identifier_owner"))
+            if txt(smp, "description"):
+                s["history"] = richtext.from_text(str(txt(smp, "description")))
+            if "is_simulation" in smp:
+                s["is_simulation"] = bool(smp["is_simulation"][()])
+            if "thickness" in smp:
+                try:
+                    v = float(smp["thickness"][()])
+                    u = smp["thickness"].attrs.get("units", "m")
+                    u = u.decode() if hasattr(u, "decode") else str(u)
+                    fac = {"m": 1e9, "meter": 1e9, "nm": 1.0, "nanometer": 1.0, "um": 1e3, "angstrom": 0.1}.get(u)
+                    s["thickness"], s["thickness_unit"] = (round(v * fac, 6), "nm") if fac else (v, u)
+                except (TypeError, ValueError):
+                    pass
+            comps = []
+            for k in smp:
+                g = smp[k]
+                if isinstance(g, h5py.Group) and g.attrs.get("NX_class") in (b"NXsample_component",
+                                                                              "NXsample_component"):
+                    c = {"name": str(txt(g, "name") or k)}
+                    for kk in ("chemical_formula", "space_group"):
+                        if txt(g, kk):
+                            c[kk] = str(txt(g, kk))
+                    comps.append(c)
+            if comps:
+                s["components"] = comps
+        users = []
+        for k in e:
+            g = e[k]
+            if isinstance(g, h5py.Group) and g.attrs.get("NX_class") in (b"NXuser", "NXuser"):
+                u = {kk: str(txt(g, kk)) for kk in ("name", "affiliation", "role") if txt(g, kk)}
+                orc = txt(g, "identifier_orcid") or txt(g, "orcid") or txt(g, "identifier")
+                if orc:
+                    u["orcid"] = norm_orcid(orc) or str(orc)
+                if u:
+                    users.append(u)
+        m["users"] = users or [{}]
+        ins = e.get("measurement/instrument")
+        if ins is not None:
+            if txt(ins, "name"):
+                m["instrument"]["name"] = str(txt(ins, "name"))
+            fab = ins.get("fabrication")
+            for k in ("vendor", "model", "serial_number"):
+                if fab is not None and txt(fab, k):
+                    m["instrument"][k] = str(txt(fab, k))
     return m

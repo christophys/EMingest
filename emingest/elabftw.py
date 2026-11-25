@@ -250,7 +250,7 @@ def entry_url(api_base, etype, eid):
     return f"{root}/{page}?mode=view&id={eid}"
 
 
-def import_entry(client, etype, eid, follow_links=True):
+def import_entry(client, etype, eid, follow_links=True, zone=None):
     """Metadata (as :func:`emingest.metadata.empty`, only the fields found) + attachments of the entry.
 
     * title -> experiment alias, date -> start, main text -> description, tags, author (with ORCID) -> user
@@ -261,6 +261,14 @@ def import_entry(client, etype, eid, follow_links=True):
     ent = client.entity(etype, eid)
     if not isinstance(ent, dict):
         raise ElabError("unexpected answer of elabFTW")
+    from . import tem_session as ts
+    if etype == "experiments" and ts.is_session(ent):        # TEM Session template (tem-provenance)
+        s = ts.session_metadata(client, eid, zone=zone or ts.DEFAULT_TZ)
+        ups = client.uploads(etype, eid)
+        summary = (f"TEM session #{eid} “{ent.get('title')}”: sample “{s['sample'].get('title')}”, "
+                   f"microscope “{s['microscope'].get('title')}”, acquisition folder {s['path']}; "
+                   f"{len(ups)} attachment(s)")
+        return {"meta": s["meta"], "uploads": ups, "summary": summary, "links": [], "entity": ent, "session": s}
     meta = {"entry": {}, "project": {}, "sample": {}, "instrument": {}, "users": [], "tags": _tags(ent),
             "source": {}}
     title = str(ent.get("title") or "")
@@ -269,8 +277,14 @@ def import_entry(client, etype, eid, follow_links=True):
                                                                         else "")
     if ent.get("date"):
         meta["entry"]["start_time"] = md.to_iso(ent["date"])
-    url = entry_url(client.base, etype, eid)
-    meta["source"] = {"elabftw_url": url, "elabftw_type": etype, "elabftw_id": int(eid), "elabftw_title": title}
+    url = client.entry_url(etype, eid) if hasattr(client, "entry_url") else entry_url(client.base, etype, eid)
+    try:
+        num = int(eid)
+    except (TypeError, ValueError):
+        num = str(eid)                         # entries of other ELN software in an .eln file
+    meta["source"] = {"elabftw_url": url, "elabftw_type": etype, "elabftw_id": num, "elabftw_title": title}
+    if getattr(client, "archive", None) is not None:
+        meta["source"]["eln_file"] = client.archive.name
     body = _body_html(ent)
     if etype == "items":                       # an item is typically the sample itself
         meta["sample"]["name"] = title
@@ -311,7 +325,9 @@ def import_entry(client, etype, eid, follow_links=True):
                         meta["sample"]["history"] = (meta["sample"].get("history") or "") + hb
                     map_extra(extra_fields(it), meta, only_sections=("sample",))
         if links:
-            lis = "".join(f"<li><a href=\"{entry_url(client.base, 'items', x['id'])}\">"
+            link = client.entry_url if hasattr(client, "entry_url") else (
+                lambda t, i: entry_url(client.base, t, i))
+            lis = "".join(f"<li><a href=\"{link('items', x['id'])}\">"
                           f"{richtext._html.escape(str(x['title']))}</a>"
                           f"{' (' + richtext._html.escape(x['category']) + ')' if x['category'] else ''}</li>"
                           for x in links)

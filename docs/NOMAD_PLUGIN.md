@@ -26,7 +26,10 @@ server in a child process of the NOMAD app behind a small proxy.
 
 Environment variables of the NOMAD app (all optional): `EMINGEST_ELABFTW_URL` (elabFTW server preselected in
 tab 3), `EMINGEST_NOMAD_API` (API address the dashboard uses, default: this NOMAD), `EMINGEST_DASHBOARD_URL`
-(serve the app elsewhere and only link it from NOMAD).
+(serve the app elsewhere and only link it from NOMAD). `EMINGEST_LOCAL_ROOTS` (folders of the NOMAD
+server, separated by `:`, from which the dashboard may read `.eln` exports and acquisition folders — none by default;
+other computers are reached over SSH), `EMINGEST_PATH_MAP` (default path mapping of acquisition folders,
+`old=new;old=new`). See [ELABFTW.md](ELABFTW.md) for the `.eln` import, TEM sessions and batches.
 
 ## Using the dashboard
 

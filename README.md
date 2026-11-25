@@ -10,7 +10,9 @@ EMingest is a NOMAD plugin (dashboard + action + ELN schema) and a small Python 
    [rosettasciio](https://hyperspy.org/rosettasciio/) or [pynxtools-em](https://github.com/FAIRmat-NFDI/pynxtools-em)
    can read;
 2. **describe** them in a form that follows the NeXus **NXem** application definition, with rich-text fields for
-   the experiment and the history of the sample — or **import** all of that from **elabFTW**;
+   the experiment and the history of the sample — or **import** all of that from **elabFTW**: from a running
+   server or from its `.eln` export (also on another computer, over SSH), including **TEM sessions** that link
+   sample, microscope and acquisition folder, one at a time or in **batches**;
 3. **store** everything in a NOMAD project, as a NOMAD ELN entry plus the data **converted to NXem**, either
    right away or by a NOMAD **action** on a worker.
 
@@ -67,6 +69,63 @@ Paste the address of an elabFTW experiment or resource (as shown in your browser
 
 *use metadata* fills only empty fields (unless *overwrite* is ticked) and appends the elabFTW text to a description
 you have already written. The API key stays in the memory of your session; it is never stored or passed on.
+
+### Without a running elabFTW: the `.eln` export
+
+elabFTW exports a team with `bin/console export:eln <team ID>` (or from the export tab of the profile page) into one
+`.eln` file — an RO-Crate with all experiments, resources, their extra fields, links and attachments. Choose
+**.eln export file** as source and give
+
+* a file added in tab 1, a path on the machine running EMingest, or
+* a location on another computer, written like for `scp`: `user@host:/var/elabftw/exports/team1.eln`, or a folder
+  (`sftp://user@host:2222/exports/` — the newest `.eln` is taken). EMingest connects over SSH (key, agent or
+  password, under *SSH access*) and reads the archive in place, transferring only its index, the metadata and
+  the attachments you choose. An unknown host key is shown with its fingerprint to compare and accept.
+
+The entries are listed (TEM sessions, experiments, resources) and imported exactly as from the server.
+
+![Tab 3: a TEM session from an .eln export](docs/screenshots/06_eln_session.png)
+
+### TEM sessions (tem-provenance templates)
+
+EMingest understands the eLabFTW workflow of [tem-provenance](https://github.com/erotunno/tem-provenance): a
+**Sample** resource registered on arrival, a **TEM Microscope** resource, and a **TEM Session** experiment that links
+both and records start and end (facility-local time) and the `Path` of the acquisition folder. Reading a session
+follows those links, like tem-provenance's exporter:
+
+* the session's elabid as experiment identifier, start and end converted to UTC (ambiguous local times are refused),
+  objective, notes and session record as description, with a provenance note;
+* the sample: name, **persistent eLabFTW ID** (`identifier_sample`) and the **owner's sample ID**
+  (`identifier_owner`) side by side, the parent sample's elabid, formula, elements from all formulas, **components**
+  of multilayer samples (`<name>_formula` / `<name>_space_group` in the *Materials* group), thickness, form,
+  preparation date and the reception and preparation record as sample history;
+* the microscope: name, vendor, model, identifier, electron source, capability, high tension.
+
+*add the files of the acquisition folder* copies all files of the session's folder into tab 1 — from this computer
+or over SSH; a **path mapping** translates the path recorded in eLabFTW (e.g. `/mnt/storage=user@nas:/data`).
+Files whose acquisition time lies outside the session are marked (specimen attribution unverified).
+
+![Tab 1: the files of a session's acquisition folder](docs/screenshots/07_session_files.png)
+
+### Batch ingestion
+
+![Batch: several TEM sessions to NOMAD](docs/screenshots/08_batch.png)
+
+*Batch* turns any number of sessions (`12, 15-18`, or all sessions of an `.eln` file) into one folder each in the
+NOMAD project: ELN entry, all acquisition files and — as chosen in tab 4 — the NXem conversion. *check* runs
+everything except the upload and lists what is missing. The same is available on the command line, e.g. on the
+workstation next to the lab storage:
+
+```bash
+emingest-ingest --eln elab@eln.lab.org:/var/elabftw/exports/ --all \
+                --map /mnt/storage=/data/tem --nomad-url https://oasis.lab.org/nomad-oasis/api/v1 \
+                --new-project "TEM sessions 2026"
+emingest-ingest --config ../tem-provenance/config.yml 12 15-18        # its eLabFTW / NOMAD settings
+emingest-ingest --nxs session-12.nxs --upload-id <id>                 # NXem files written by tem-provenance
+```
+
+Keys come from `ELABFTW_API_KEY` / `NOMAD_API_KEY` (as in tem-provenance) or a prompt. Details:
+[docs/ELABFTW.md](docs/ELABFTW.md).
 
 ## 4 · Upload to NOMAD and convert to NXem
 
@@ -132,7 +191,7 @@ what the schema contains): [docs/NOMAD_PLUGIN.md](docs/NOMAD_PLUGIN.md).
 **Without NOMAD:**
 
 ```bash
-pip install "emingest[formats] @ git+https://github.com/christophys/EMingest"
+pip install "emingest[formats,remote] @ git+https://github.com/christophys/EMingest"
 ```
 
 * Jupyter / Voilà: [`notebooks/emingest_app.ipynb`](notebooks/emingest_app.ipynb)
@@ -164,13 +223,17 @@ pip install "emingest[formats] @ git+https://github.com/christophys/EMingest"
 | `emingest/metadata.py` | the form's fields (NXem required / recommended), checks, `eln_data.yaml` |
 | `emingest/richtext.py` | rich-text editor widget, HTML sanitising, HTML → text |
 | `emingest/elabftw.py` | elabFTW API v2 client and mapping to the form |
+| `emingest/eln_archive.py` | elabFTW `.eln` exports (RO-Crate) with the interface of the API client |
+| `emingest/remote.py` | files and folders on other computers over SSH / SFTP |
+| `emingest/tem_session.py` | TEM sessions of the tem-provenance templates |
+| `emingest/ingest.py`, `cli.py` | headless pipeline, batch ingestion, `emingest-ingest` |
 | `emingest/nx_reader.py` | the pynxtools reader `tem` |
 | `emingest/convert.py` | NXem conversion (one process per file, size and time limits) |
 | `emingest/eln.py` | NOMAD ELN entry, conversion record and workflow |
 | `emingest/nomad.py`, `nomad_project.py` | NOMAD API client, project choice, streamed uploads |
 | `emingest/app.py` | the app (ipywidgets) |
 | `emingest_nomad/` | NOMAD plugin: dashboard, action (Temporal workflow), schema |
-| `tests/` | synthetic data of every kind, mock NOMAD and elabFTW servers, the action on a Temporal dev server |
+| `tests/` | synthetic data of every kind, mock NOMAD and elabFTW servers, `.eln` exports, an SSH server, the action on a Temporal dev server |
 
 Run the tests with `pytest tests`.
 

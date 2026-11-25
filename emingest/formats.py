@@ -184,6 +184,9 @@ def inspect_file(path, max_eager_mb=200):
     if n.endswith(SKIP_NAMES):
         info.update(format="metadata", note="metadata file (not converted)")
         return info
+    if n.endswith(".eln"):
+        info.update(format="elabFTW export (.eln)", note="eLabFTW export: open it in tab 3 (not uploaded as data)")
+        return info
     if pynxtools_em_accepts(n):
         info["readers"].append("pynxtools-em")
     if is_sidecar(n):
