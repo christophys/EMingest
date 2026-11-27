@@ -101,7 +101,10 @@ workflow added to the upload). The result lists converted, failed and skipped fi
 2. if it wrote no data (formats it does not know: TIA, .bcf, .mib, blockfile, .hspy, DENS, TVIPS, generic TIFF /
    PNG …) every rosettasciio signal of the file becomes an NXem event: `image_2d`, `image_3d` (focal / tilt / time
    series), `image_4d` (4D-STEM), `spectrum_0d` … `spectrum_3d` (spectra, line scans, spectrum images), other
-   dimensionalities as `NXdata`, with axes, units and the checksum of the source file;
+   dimensionalities as `NXdata`, with axes, units and the checksum of the source file. Nion Swift exports
+   (`.npy` + `.json`, or a `.zip` with both; `emingest/nion.py`) take this path too: high tension, acquisition
+   time, semi-convergence angle, field of view and scan rotation from the JSON, lossless uint16 / uint32 for
+   counts, and data above 256 MB streamed into the file row by row;
 3. instrument (`/ENTRY/measurement/instrument`: name, location, type, fabrication, high tension, electron source,
    operation mode), sample identifiers, physical form and description, ORCIDs of the users as
    `identifier_orcid` (type ORCID).

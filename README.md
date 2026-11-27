@@ -8,7 +8,7 @@ EMingest is a NOMAD plugin (dashboard + action + ELN schema) and a small Python 
 1. **upload** any number of files of any size — images, diffraction patterns, EELS/EDS spectra, focal series,
    tilt series, 4D-STEM data sets, spectrum images … — in every format that
    [rosettasciio](https://hyperspy.org/rosettasciio/) or [pynxtools-em](https://github.com/FAIRmat-NFDI/pynxtools-em)
-   can read;
+   can read, and **Nion Swift exports** (`.npy` + `.json`, or both in a `.zip`);
 2. **describe** them in a form that follows the NeXus **NXem** application definition, with rich-text fields for
    the experiment and the history of the sample — or **import** all of that from **elabFTW**: from a running
    server or from its `.eln` export (also on another computer, over SSH), including **TEM sessions** that link
@@ -168,10 +168,29 @@ EMingest registers a pynxtools reader called `tem`:
    DENS, HyperSpy .hspy/.zspy, generic TIFF/PNG …) each signal is written as an NXem event: `image_2d`,
    `image_3d` (focal / tilt / time series), `image_4d` (4D-STEM), `spectrum_0d` … `spectrum_3d` (spectra, line
    scans, spectrum images) — with axes, units and the checksum of the source file;
-3. the instrument, sample and user metadata of the form are added (ORCIDs as `identifier_orcid`).
+3. **Nion Swift exports** take the same path (see below);
+4. the instrument, sample and user metadata of the form are added (ORCIDs as `identifier_orcid`).
 
 With the required and recommended fields filled in, the NXem files validate without warnings. Each file is
 converted in its own process, with limits on size and time, so one broken file does not stop the others.
+
+### Nion Swift exports
+
+Nion Swift exports a data item as `<name>.npy` (data) and `<name>.json` (calibrations and metadata). EMingest takes
+both files of the same name together, or a `<name>.zip` that contains them (reading as in `nion2nxs` of
+[fit4DSTEM](https://github.com/christophys/fit4DSTEM)):
+
+* the **kind** comes from the dimension counts in the JSON (`collection_dimension_count`,
+  `datum_dimension_count`, `is_sequence`), else from the shape: 4D → 4D-STEM, 3D with an energy axis → spectrum
+  image, 2D → image …; the scan axes keep their calibration (nm), the camera axes of 4D-STEM are in pixels;
+* "metadata from the files" in tab 1 fills the high tension, vendor (Nion), detector and acquisition time;
+* the NXem file gets the data with axes and units, the high tension, and for the event the start time,
+  semi-convergence angle, field of view and scan rotation (`/ENTRY/measurement/event1/instrument`);
+* values are stored **losslessly** in the smallest type: integer counts (also when exported as floats) as
+  uint16 / uint32, everything else in the original type; gzip-compressed;
+* data larger than 256 MB (`EMINGEST_NION_MAX_MEMORY_MB`) are not loaded: they are streamed into the NXem file row
+  by row, also out of a zip, so multi-GB 4D-STEM scans convert with little memory. The `.json` itself is uploaded
+  next to the data.
 
 ## Install
 
@@ -219,7 +238,8 @@ pip install "emingest[formats,remote] @ git+https://github.com/christophys/EMing
 
 | | |
 |---|---|
-| `emingest/formats.py` | format and kind of a file, grouping of sidecar files (`.mdoc`, `.hdr` …) |
+| `emingest/formats.py` | format and kind of a file, grouping of sidecar files (`.mdoc`, `.hdr`, `.json` …) |
+| `emingest/nion.py` | Nion Swift exports (`.npy` + `.json`, `.zip`): metadata, lossless types, streaming |
 | `emingest/metadata.py` | the form's fields (NXem required / recommended), checks, `eln_data.yaml` |
 | `emingest/richtext.py` | rich-text editor widget, HTML sanitising, HTML → text |
 | `emingest/elabftw.py` | elabFTW API v2 client and mapping to the form |

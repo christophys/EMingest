@@ -21,4 +21,4 @@ eln        NOMAD ELN, conversion and workflow archives
 nomad      NOMAD API client (uploads, streamed file transfer, actions)
 app        the GUI (Jupyter / Voila / Solara / NOMAD dashboard)
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"

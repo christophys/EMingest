@@ -127,7 +127,8 @@ class App:
         exts = ", ".join(formats.supported_extensions())
         rows.append(W.HTML(f"<small>Any number of files, of any size (transferred in chunks). Other files (notes, "
                            f"PDFs …) are uploaded as they are.</small><details style='font-size:12px;color:#666'>"
-                           f"<summary>formats read by rosettasciio / pynxtools-em</summary>{html.escape(exts)}"
+                           f"<summary>formats read by rosettasciio / pynxtools-em; Nion Swift exports: .npy + .json of the same "
+                           f"name, or both in one .zip</summary>{html.escape(exts)}"
                            f"</details>"))
         rows.append(self.w_up_progress)
         self.w_table = W.HTML()

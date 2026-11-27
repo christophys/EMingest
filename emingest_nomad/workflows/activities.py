@@ -95,7 +95,7 @@ def stage_conversion(data: ConversionInput) -> StagedConversion:
         eln_data = sorted(cands)[0] if cands else ""
     elif not be.is_file(uid, eln_data):
         raise ApplicationError(f"{eln_data!r} not found in the upload", non_retryable=True)
-    data_paths = [f for f in files if convert.convertible(f)]
+    data_paths = [f for f in files if convert.convertible(f) or formats.is_sidecar(f)]
     groups = [g for g in formats.group_files(data_paths) if convert.convertible(g[0])]
     if not groups:
         raise ApplicationError("no data files that rosettasciio or pynxtools-em can read" +

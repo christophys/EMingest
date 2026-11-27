@@ -10,13 +10,16 @@
 
 :func:`inspect_file` never raises: a file that cannot be read gets ``kind="other"`` and the error in ``note``.
 :func:`group_files` puts sidecar files (``x.mrc`` + ``x.mrc.mdoc``, ``x.tif`` + ``x.hdr`` / ``x.txt``) with their
-data file: pynxtools-em converts at most two data files at a time.
+data file: pynxtools-em converts at most two data files at a time.  Nion Swift exports (``x.npy`` + ``x.json``, or
+both in ``x.zip``) are read by :mod:`emingest.nion`; the ``.json`` is the sidecar of the ``.npy``.
 """
 from __future__ import annotations
 
 import importlib
 import os
 import re
+
+from . import nion
 
 KINDS = ["image", "diffraction pattern", "spectrum", "image series", "focal series", "tilt series",
          "diffraction series", "4D-STEM", "spectrum image", "line scan", "hologram", "other"]
@@ -25,7 +28,8 @@ KINDS = ["image", "diffraction pattern", "spectrum", "image series", "focal seri
 PYNXTOOLS_EM_SUFFIXES = (".emd", ".msa", ".dm2", ".dm3", ".dm4", ".dm5", ".tiff", ".tif", ".txt", ".zip", ".nsproj",
                          ".edaxh5", ".h5oina", ".oh5", ".dream3d", ".mtex.h5", ".h5", ".hdf5", ".hdr", ".mrc",
                          ".mrc.mdoc", ".rawtlt", ".shifts", ".xml")
-SIDECAR_SUFFIXES = (".mdoc", ".rawtlt", ".shifts", ".hdr", ".txt", ".xml", ".emi")
+SIDECAR_SUFFIXES = (".mdoc", ".rawtlt", ".shifts", ".hdr", ".txt", ".xml", ".emi", ".json")
+NION_SUFFIXES = (".npy", ".json")
 NEXUS_SUFFIXES = (".nxs", ".nx", ".nexus")
 SKIP_NAMES = ("eln_data.yaml", ".archive.yaml", ".archive.json")
 # formats that are (almost) always 4D-STEM / diffraction stacks
@@ -45,8 +49,9 @@ def rsciio_extensions():
 
 
 def supported_extensions():
-    """All suffixes the dashboard accepts (rosettasciio + pynxtools-em + NeXus)."""
-    return sorted(set(rsciio_extensions()) | set(PYNXTOOLS_EM_SUFFIXES) | set(NEXUS_SUFFIXES) | {".mdoc"})
+    """All suffixes the dashboard accepts (rosettasciio + pynxtools-em + Nion exports + NeXus)."""
+    return sorted(set(rsciio_extensions()) | set(PYNXTOOLS_EM_SUFFIXES) | set(NEXUS_SUFFIXES) | {".mdoc"}
+                  | set(NION_SUFFIXES))
 
 
 def rsciio_plugins_for(path):
@@ -62,7 +67,8 @@ def pynxtools_em_accepts(path):
 
 def is_sidecar(path):
     n = path.lower()
-    return n.endswith((".mrc.mdoc", ".rawtlt", ".shifts")) or n.endswith(".mdoc")
+    return n.endswith((".mrc.mdoc", ".rawtlt", ".shifts", ".mdoc")) or (n.endswith(".json") and not n.endswith(
+        SKIP_NAMES))
 
 
 def _f(x, default=None):
@@ -157,6 +163,8 @@ def _axes_info(signal):
 
 def read_signals(path, lazy=True):
     """rosettasciio signal dicts of the file (first plugin that reads it).  Returns (plugin_name, signals)."""
+    if nion.is_nion(path):
+        return nion.FORMAT, [nion.signal(path, load=None if lazy else True)]
     errs = []
     for p in rsciio_plugins_for(path):
         try:
@@ -187,10 +195,14 @@ def inspect_file(path, max_eager_mb=200):
     if n.endswith(".eln"):
         info.update(format="elabFTW export (.eln)", note="eLabFTW export: open it in tab 3 (not uploaded as data)")
         return info
+    if nion.is_nion(path):
+        return _inspect_nion(path, info)
     if pynxtools_em_accepts(n):
         info["readers"].append("pynxtools-em")
     if is_sidecar(n):
-        info.update(format="sidecar", kind="other", note="sidecar file (converted with its data file)")
+        note = "metadata of the Nion data of the same name" if n.endswith(".json") else \
+            "sidecar file (converted with its data file)"
+        info.update(format="sidecar", kind="other", note=note)
         return info
     if n.endswith(NEXUS_SUFFIXES):
         info.update(format="NeXus", readers=["NeXus"], note="NeXus file: parsed by NOMAD as it is")
@@ -242,6 +254,23 @@ def inspect_file(path, max_eager_mb=200):
     return info
 
 
+def _inspect_nion(path, info):
+    try:
+        s = nion.signal(path, load=False)
+    except Exception as e:  # noqa: BLE001
+        info.update(format=nion.FORMAT, note=f"not readable as Nion export: {str(e)[:200]}")
+        return info
+    has_json = bool(s["original_metadata"])
+    kind = s["kind"] or classify(s, os.path.splitext(path)[1].lower(), os.path.basename(path))
+    info.update(format=nion.FORMAT, readers=["EMingest (Nion)"], kind=kind, kinds=[kind], shape=list(s["shape"]),
+                axes=_axes_info(s), title=str(s["metadata"]["General"].get("title") or ""),
+                signal_type=s["metadata"]["Signal"]["signal_type"], metadata=_instrument_hints(s["metadata"]))
+    if not has_json:
+        info["note"] = "no .json with the metadata found" + (" in the zip" if path.lower().endswith(".zip") else
+                                                              " (expected: same name, .json)")
+    return info
+
+
 def _nbytes(s):
     try:
         import numpy as np
@@ -266,7 +295,7 @@ def _instrument_hints(md):
     if _f(tem.get("beam_energy")):
         out["voltage_kV"] = _f(tem.get("beam_energy"))
     for k in ("microscope", "magnification", "camera_length", "convergence_angle", "probe_area", "beam_current",
-              "acquisition_mode"):
+              "acquisition_mode", "detector", "vendor"):
         if tem.get(k) not in (None, ""):
             out[k] = tem.get(k)
     gen = md.get("General") or {}

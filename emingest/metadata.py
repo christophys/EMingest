@@ -263,7 +263,7 @@ def merge(meta, other, overwrite=False):
 
 
 def from_file_hints(infos):
-    """Metadata found in the data files (rosettasciio): high tension, microscope, acquisition date."""
+    """Metadata found in the data files (rosettasciio, Nion JSON): high tension, microscope, detector, date."""
     m = {"entry": {}, "instrument": {}}
     dates = sorted(i["metadata"]["date"] for i in infos if (i.get("metadata") or {}).get("date"))
     if dates:
@@ -277,6 +277,10 @@ def from_file_hints(infos):
             m["instrument"]["voltage_kV"] = v / 1e3 if v > 1e4 else v      # eV -> kV if needed
         if h.get("microscope") and "model" not in m["instrument"]:
             m["instrument"]["model"] = str(h["microscope"])
+        if h.get("vendor") and "vendor" not in m["instrument"]:
+            m["instrument"]["vendor"] = str(h["vendor"])
+        if h.get("detector") and "detectors" not in m["instrument"]:
+            m["instrument"]["detectors"] = str(h["detector"])
     return m
 
 

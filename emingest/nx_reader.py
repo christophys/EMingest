@@ -9,6 +9,9 @@ rosettasciio reads, with the metadata of ``eln_data.yaml``.
    DENS, TVIPS, generic TIFF / PNG ...), every signal that rosettasciio reads from the file is written as NXimage /
    NXspectrum of an event (image_2d, image_3d for focal / tilt / time series, image_4d for 4D-STEM, spectrum_0d .. 3d
    for spectra, line scans and spectrum images; other dimensionalities as NXdata);
+   Nion Swift exports (``.npy`` + ``.json`` or ``.zip``, :mod:`emingest.nion`) take this path too; their high
+   tension, convergence angle and acquisition time are written, and large data are streamed into the file after
+   pynxtools has written it (``nion.fill_pending``);
 3. the instrument (``/ENTRY/measurement/instrument``: name, location, fabrication, high tension) and the sample
    fields that pynxtools-em does not read (identifier, parent, physical form, description) are added.
 """
@@ -22,7 +25,7 @@ import numpy as np
 import yaml
 from pynxtools.dataconverter.readers.base.reader import BaseReader
 
-from . import formats
+from . import formats, nion
 
 ENTRY = 1
 
@@ -49,8 +52,24 @@ def _unit(u):
         return None
 
 
-def _compressed(a):
+class _Shared(np.ndarray):
+    """Array that ``copy.deepcopy`` does not copy: the validation of pynxtools deep-copies the template several
+    times, which would multiply the memory needed for the data."""
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __copy__(self):
+        return self
+
+
+def shared(a):
     a = np.asarray(a)
+    return a.view(_Shared) if a.ndim else a
+
+
+def _compressed(a):
+    a = shared(a)
     if a.ndim == 0 or a.size < 1024:
         return a
     try:
@@ -87,13 +106,22 @@ def _layout(nav, sig, energy):
 def write_signal(template, signal, event, source, checksum, kind="", plugin="", detector=""):
     """One rosettasciio signal -> NXem event (see module docstring).  Returns the target group."""
     data = signal["data"]
-    if hasattr(data, "compute"):
-        data = data.compute()
-    data = np.asarray(data)
+    stream = data is None and signal.get("source") and signal.get("shape")    # large Nion export: written later
+    if stream:       # full shape for the validation, no memory (convert_in_process writes a tiny dataset)
+        data = shared(np.broadcast_to(np.zeros((), dtype=np.dtype(signal["dtype"])), tuple(signal["shape"])))
+    else:
+        if hasattr(data, "compute"):
+            data = data.compute()
+        data = np.asarray(data)
+        if signal.get("original_metadata") is not None and "summary" in signal:          # Nion: lossless type
+            t = nion.lossless_dtype(data)
+            if t != data.dtype:
+                data = data.astype(t)
+    shape = tuple(signal["shape"]) if stream else data.shape
     axes = list(signal.get("axes") or [])
-    if len(axes) != data.ndim or any(int(a.get("size", -1)) != n for a, n in zip(axes, data.shape)):
+    if len(axes) != data.ndim or any(int(a.get("size", -1)) != n for a, n in zip(axes, shape)):
         axes = [{"name": f"dim_{i}", "size": n, "scale": 1.0, "offset": 0.0, "units": "", "navigate": i < data.ndim - 2}
-                for i, n in enumerate(data.shape)]
+                for i, n in enumerate(shape)]
     nav = sum(1 for a in axes if a.get("navigate"))
     sig = data.ndim - nav
     energy = sig == 1 and formats._unit_class(axes[-1].get("units")) in ("energy",) or (
@@ -102,6 +130,8 @@ def write_signal(template, signal, event, source, checksum, kind="", plugin="", 
     order = [i for i, a in enumerate(axes) if a.get("navigate")] + [i for i, a in enumerate(axes)
                                                                     if not a.get("navigate")]
     if order != list(range(data.ndim)):
+        if stream:
+            raise ValueError("streamed data must have the navigation axes first")
         data = np.transpose(data, order)
         axes = [axes[i] for i in order]
     md = signal.get("metadata") or {}
@@ -129,16 +159,20 @@ def write_signal(template, signal, event, source, checksum, kind="", plugin="", 
     template[f"{src_grp}/PROCESS[process]/detector_identifier"] = detector or "unknown"
     template[f"{grp}/title"] = f"{title}" + (f" ({kind})" if kind else "")
     template[f"{grp}/@signal"] = sigf
-    template[f"{grp}/{sigf}"] = _compressed(data)
+    if stream:
+        template[f"{grp}/{sigf}"] = data
+        nion.PENDING.append((f"{grp}/{sigf}", signal["source"]))
+    else:
+        template[f"{grp}/{sigf}"] = _compressed(data)
     template[f"{grp}/{sigf}/@long_name"] = "Intensity" if sigf != "complex" else "Complex amplitude"
     template[f"{grp}/@axes"] = list(names)
     for idx, (nm, a) in enumerate(zip(names, axes)):
-        n = data.shape[idx]
+        n = shape[idx]
         vals = np.asarray(float(a.get("offset") or 0.0) + np.arange(n) * float(a.get("scale") or 1.0),
                           dtype=np.float64)
         key = f"{grp}/AXISNAME[{nm}]"
         template[f"{grp}/@AXISNAME_indices[{nm}_indices]"] = np.uint32(idx)
-        template[key] = vals
+        template[key] = shared(vals)
         u = _unit(a.get("units"))
         if u:
             template[f"{key}/@units"] = u
@@ -239,7 +273,7 @@ class TEMReader(BaseReader):
         data = [f for f in files if f not in elns and not f.lower().endswith((".yaml", ".yml"))]
         em_data = [f for f in data if formats.pynxtools_em_accepts(f)]
         out = None
-        if em_data and len(em_data) == len(data):
+        if em_data and len(em_data) == len(data) and not any(nion.is_nion(f) for f in data):
             try:
                 out = EMReader().read(template=template, file_paths=tuple(em_data + elns[:1]))
             except Exception as e:  # noqa: BLE001  -- vendor parser failed: generic path below
@@ -260,11 +294,14 @@ class TEMReader(BaseReader):
                 if formats.is_sidecar(f):
                     continue
                 try:
-                    _fmt, sigs = formats.read_signals(f, lazy=False)
+                    _fmt, sigs = formats.read_signals(f, lazy=nion.is_nion(f))   # Nion: large data streamed
                 except Exception as e:  # noqa: BLE001
                     print(f"tem reader: rosettasciio cannot read {f}: {e}")
                     continue
                 chk = _sha256(f)
+                if _fmt == nion.FORMAT:
+                    nion.nx_metadata(out, sigs[0]["summary"], ENTRY, event)
+                    detector = detector or str(sigs[0]["summary"].get("detector") or "")
                 for s in sigs:
                     write_signal(out, s, event, f, chk, kind=formats.classify(s, os.path.splitext(f)[1].lower(),
                                                                               os.path.basename(f)),

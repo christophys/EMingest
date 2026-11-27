@@ -17,7 +17,9 @@ import subprocess
 import sys
 import time
 
-from . import formats
+import numpy as np
+
+from . import formats, nion
 
 
 def _patch_reader():
@@ -39,9 +41,21 @@ def _patch_reader():
 def convert_in_process(files, eln_yaml, output):
     pc = _patch_reader()
     inputs = tuple(list(files) + ([eln_yaml] if eln_yaml else []))
-    pc.convert(input_file=inputs, reader="tem", nxdl="NXem", output=output)
+    nion.PENDING.clear()
+    # = pynxtools.dataconverter.convert.convert, with large Nion data validated as zero-memory placeholders of
+    # the full shape, written as tiny datasets and then streamed into the file (nion.fill_pending)
+    from pynxtools.dataconverter import helpers
+    from pynxtools.dataconverter.writer import Writer
+    nxdl_root, nxdl_f_path = helpers.get_nxdl_root_and_path("NXem")
+    data = pc.transfer_data_into_template(input_file=inputs, reader="tem", nxdl_name="NXem", nxdl_root=nxdl_root)
+    for key, _src in nion.PENDING:
+        if key in data:
+            data[key] = np.zeros((1,) * np.ndim(data[key]), dtype=np.asarray(data[key]).dtype)
+    helpers.add_default_root_attributes(data=data, filename=os.path.basename(output), append=False)
+    Writer(data=data, nxdl_f_path=nxdl_f_path, output_path=output, append=False).write()
     if not os.path.isfile(output):
         raise RuntimeError("pynxtools wrote no file")
+    nion.fill_pending(output, log=print)
     return output
 
 
@@ -122,7 +136,8 @@ def output_names(groups, suffix=".nxs"):
 def convertible(path):
     n = path.lower()
     return not n.endswith(formats.SKIP_NAMES + formats.NEXUS_SUFFIXES) and (
-        formats.pynxtools_em_accepts(n) or bool(formats.rsciio_plugins_for(n)))
+        n.endswith(".npy") or (n.endswith(".zip") and os.path.isfile(path) and nion.is_nion(path))
+        or formats.pynxtools_em_accepts(n) or bool(formats.rsciio_plugins_for(n)))
 
 
 def convert_all(paths, eln_yaml, out_dir, callback=None, stop=None, isolate=True, timeout=None, max_gb=None,
